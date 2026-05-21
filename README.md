@@ -1,8 +1,6 @@
 # Windrose - More Ring and Necklace Slots - Existing Character Patcher - v1.0
 
-**This is not a mod. This is for patching existing characters to work with the existing Nexus mod [More Ring and Necklace Slots](https://www.nexusmods.com/windrose/mods/350) mod by Baradrim.**
-
-A small tool that updates your **existing** Windrose characters to work with the **[More Ring and Necklace Slots mod](https://www.nexusmods.com/windrose/mods/350)** mod by Baradrim.
+**This is not a mod. This is a tool for patching your existing Windrose characters to work with the existing Nexus mod [More Ring and Necklace Slots](https://www.nexusmods.com/windrose/mods/350) mod by Baradrim, so you don't need to make a new character to use the mod**
 
 If you are creating a new character with the mod install, you do not need this patcher.
 
