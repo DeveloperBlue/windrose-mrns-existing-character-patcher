@@ -43,6 +43,7 @@ If you are creating a new character with the mod install, you do not need this p
 
 1. Download the latest version of the patcher from [releases](https://github.com/DeveloperBlue/windrose-mrns-existing-character-patcher/releases)
 1. Disable Steam Cloud Sync
+    In Steam → right-click Windrose → Properties → General → uncheck "Keep game saves in the Steam Cloud".
 2. Run the patcher and follow the instructions
 3. Launch the game and verify that you have the extra slots
 4. Close the game and re-enable Steam Cloud Sync
