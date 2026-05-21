@@ -10,13 +10,15 @@ If you are creating a new character with the mod install, you do not need this p
 ## How to Use
 
 > [!CAUTION]
-> It is **HIGHLY RECOMMENDED** that you **create a backup of your save folder**. 
-> Your saves can be found at  `%LOCALAPPDATA%\R5\Saved\SaveProfiles\<STEAM_ID>\`, speficically the ``RocksDB_v2`` and ``RocksDB_v2_Backups`` folders.
+> It is **HIGHLY RECOMMENDED** that you **create a backup of your save folder**. Scroll down to see how. 
+>
 > Windrose is constantly updating and mods and tooling usually lag behind. Ensure you are taking the best steps to protect your saves.
 
 > [!IMPORTANT]
 > You must *temporarily* disable Steam Cloud Sync for Windrose before relaunching the game. When you launch the game, Steam pulls your old save from the cloud and overwrites the new patched save. You can and should re-enable it after you verify the patcher has worked.
+>
 > To disable: **Steam** → right-click Windrose → Properties → General → uncheck *"Keep game saves in the Steam Cloud"*.
+>
 > If Steam asks about a conflict, pick "Use Local files".
 
 **Running the patcher**
@@ -61,17 +63,22 @@ pyinstaller windrose_patch.spec
 The compiled `windrose_mrns_patcher.exe` can be found in the `dist\` folder.
 
 ----
+# FAQs
 
-# Bugs
+## How to backup my saves
+Your saves can be found at  `%LOCALAPPDATA%\R5\Saved\SaveProfiles\<STEAM_ID>\`
+
+I would create copies of the ``RocksDB_v2`` and ``RocksDB_v2_Backups`` folders. Note that Steam Cloud Sync modifies these folders, so keep your backups OUTSIDE of SavedProfiles.
+
+## How do I report a bug
 If you have discovered any bugs, feel free to leave an issue here on [GitHiub](https://github.com/DeveloperBlue/windrose-mrns-existing-character-patcher/issues) or send an email over to ``contact@michaelrooplall.com``.
 
-----
-
-# Undoing the patch
+## Undoing the patch
 
 If you want to "undo" the patcher and remove the extra slots:
 - Follow the "How to Use" section again, and specify "1" for the number of ring and necklace slots.
 - Also remove the nexus mod if you don't want it to apply to future characters.
 
-# Thanks
+----
+# Special Thanks
 Special thanks to [agreenbeen/windrose-save-tool](https://github.com/agreenbeen/windrose-save-tool/tree/main) for the detailed information on how Windrose requires uncompressed saves for RocksDB-- solved a lot of headaches. 
