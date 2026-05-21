@@ -42,11 +42,10 @@ If you are creating a new character with the mod install, you do not need this p
 ### Running the patcher
 
 1. Download the latest version of the patcher from [releases](https://github.com/DeveloperBlue/windrose-mrns-existing-character-patcher/releases)
-1. Disable Steam Cloud Sync
-    In Steam → right-click Windrose → Properties → General → uncheck "Keep game saves in the Steam Cloud".
-2. Run the patcher and follow the instructions
-3. Launch the game and verify that you have the extra slots
-4. Close the game and re-enable Steam Cloud Sync
+2. Disable Steam Cloud Sync.<br/>In Steam → right-click Windrose → Properties → General → uncheck "Keep game saves in the Steam Cloud".
+3. Run the patcher and follow the instructions
+4. Launch the game and verify that you have the extra slots
+5. Close the game and re-enable Steam Cloud Sync
 
 I apologize if Chrome, Windows Defender, or your Antivirus flags the file as a virus. This is just the nature of all unsigned *.exe files. If this is not acceptable for you, consider building from source yourself.
 
