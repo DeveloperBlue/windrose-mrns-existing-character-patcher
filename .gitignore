@@ -1,0 +1,5 @@
+debug/
+mod/
+build/
+dist/
+__pycache__/

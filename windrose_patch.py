@@ -1,0 +1,630 @@
+"""
+Windrose - More Ring and Necklace Slots - Existing Character Patcher
+====================================================================
+
+The save profile is a RocksDB database keyed under the `R5BLPlayer` column
+family.  Each character's value is a BSON document tree.  The Jewelry module
+inside that tree has two parallel views that the game cross-checks on load:
+
+    ModuleParams.Slots  - blueprint  (one entry per slot TYPE: Ring,
+                                      Necklace, Backpack)
+    Slots               - live array (one entry per physical SLOT, with a
+                                      unique SlotId, SlotParams path, and
+                                      an ItemsStack)
+
+Editing only the blueprint `CountSlots` integers is not enough: at next save
+the game notices "blueprint says 4 rings, but I only see 1 live ring slot"
+and rewrites the blueprint back to 1.  This patcher walks the actual BSON
+tree, edits the blueprint, AND grows the live `Slots` array by cloning the
+empty Ring/Necklace slot template, renumbering element indices and
+`SlotId`s, and recomputing every parent sub-document's size prefix.
+
+The game also restores the live RocksDB from a checkpoint ZIP at
+
+    .../SaveProfiles/<steamid>/RocksDB_v2_Backups/Players/<id>/<id>_<version>_Latest.zip
+
+on every load, so after writing to the live DB we rebuild that ZIP via
+`checkpoint_zip.update_checkpoint_zip` — otherwise the next launch silently
+reverts the edit.
+
+Usage:
+    Drag your character's save folder onto this script (or the .exe).
+    The save folder is the one ending in your character's UUID, e.g.
+    .../RocksDB_v2/0.10.0/Players/A20A1BAF32E94A13DBB24BD4B9814EC8/
+"""
+from __future__ import annotations
+
+import os
+import sys
+from pathlib import Path
+
+try:
+    from rocksdict import DBCompressionType, Options, Rdict
+except ImportError:
+    print("ERROR: The 'rocksdict' library is not installed.")
+    print("       Run:  pip install rocksdict")
+    input("\nPress Enter to exit...")
+    sys.exit(1)
+
+try:
+    from checkpoint_zip import update_checkpoint_zip
+except ImportError:
+    print("ERROR: checkpoint_zip.py is missing from the script folder.")
+    input("\nPress Enter to exit...")
+    sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
+# Game-specific constants
+# ---------------------------------------------------------------------------
+
+PLAYER_CF_NAME = "R5BLPlayer"
+JEWELRY_TAG = "Inventory.Module.Jewelry"
+RING_PATH = "/R5BusinessRules/Inventory/SlotsParams/DA_BL_Slot_Equipment_Ring.DA_BL_Slot_Equipment_Ring"
+NECK_PATH = "/R5BusinessRules/Inventory/SlotsParams/DA_BL_Slot_Equipment_Necklace.DA_BL_Slot_Equipment_Necklace"
+BACK_PATH = "/R5BusinessRules/Inventory/SlotsParams/DA_BL_Slot_Equipment_Backpack.DA_BL_Slot_Equipment_Backpack"
+
+SLOT_MIN = 1
+SLOT_MAX = 10
+
+
+# ---------------------------------------------------------------------------
+# Minimal BSON reader
+# ---------------------------------------------------------------------------
+#
+# This is not a general-purpose BSON library.  We only care about the subset
+# of types the game actually emits in the player document.
+
+BT_DOUBLE = 0x01
+BT_STRING = 0x02
+BT_SUBDOC = 0x03
+BT_ARRAY  = 0x04
+BT_BINARY = 0x05
+BT_BOOL   = 0x08
+BT_NULL   = 0x0A
+BT_INT32  = 0x10
+BT_INT64  = 0x12
+
+
+def _u32(buf: bytes, pos: int) -> int:
+    return int.from_bytes(buf[pos:pos + 4], "little", signed=False)
+
+
+def _i32(buf: bytes, pos: int) -> int:
+    return int.from_bytes(buf[pos:pos + 4], "little", signed=True)
+
+
+def _cstring_end(buf: bytes, pos: int) -> int:
+    end = buf.find(b"\x00", pos)
+    if end == -1:
+        raise ValueError(f"BSON: unterminated cstring at {pos}")
+    return end
+
+
+def _value_end(buf: bytes, pos: int, t: int) -> int:
+    if t == BT_DOUBLE: return pos + 8
+    if t == BT_STRING: return pos + 4 + _u32(buf, pos)
+    if t in (BT_SUBDOC, BT_ARRAY): return pos + _u32(buf, pos)
+    if t == BT_BINARY: return pos + 4 + 1 + _u32(buf, pos)
+    if t == BT_BOOL: return pos + 1
+    if t == BT_NULL: return pos
+    if t == BT_INT32: return pos + 4
+    if t == BT_INT64: return pos + 8
+    raise ValueError(f"BSON: unsupported type 0x{t:02x} at {pos}")
+
+
+def iter_elements(buf: bytes, doc_start: int):
+    """Yield (type, name_bytes, value_pos, value_end) for each element inside
+    the sub-document or array starting at `doc_start`.  `value_end` is one
+    past the element's last byte (so element_total_end == value_end)."""
+    doc_end = doc_start + _u32(buf, doc_start)
+    pos = doc_start + 4
+    while pos < doc_end:
+        t = buf[pos]
+        if t == 0:
+            return
+        name_start = pos + 1
+        name_end = _cstring_end(buf, name_start)
+        value_pos = name_end + 1
+        v_end = _value_end(buf, value_pos, t)
+        yield (t, bytes(buf[name_start:name_end]), value_pos, v_end)
+        pos = v_end
+
+
+def find_field(buf: bytes, doc_start: int, name):
+    name_b = name.encode("utf-8") if isinstance(name, str) else name
+    for t, n, vpos, vend in iter_elements(buf, doc_start):
+        if n == name_b:
+            return (t, vpos, vend)
+    return None
+
+
+def read_string(buf: bytes, value_pos: int) -> str:
+    n = _u32(buf, value_pos)
+    if n <= 0:
+        return ""
+    return bytes(buf[value_pos + 4:value_pos + 4 + n - 1]).decode("utf-8", errors="replace")
+
+
+def read_int32(buf: bytes, value_pos: int) -> int:
+    return _i32(buf, value_pos)
+
+
+# ---------------------------------------------------------------------------
+# Locate the Jewelry module and everything we care about inside it
+# ---------------------------------------------------------------------------
+
+
+def _classify_slot_path(spath: str) -> str | None:
+    if spath == RING_PATH: return "ring"
+    if spath == NECK_PATH: return "neck"
+    if spath == BACK_PATH: return "back"
+    return None
+
+
+def _slot_has_item(buf: bytes, slot_doc_start: int) -> bool:
+    """A live slot has an equipped item if ItemsStack.Count != 0 or
+    ItemsStack.Item.ItemId is a non-empty string."""
+    stack = find_field(buf, slot_doc_start, "ItemsStack")
+    if not stack or stack[0] != BT_SUBDOC:
+        return False
+    cnt = find_field(buf, stack[1], "Count")
+    if cnt and cnt[0] == BT_INT32 and read_int32(buf, cnt[1]) != 0:
+        return True
+    item = find_field(buf, stack[1], "Item")
+    if item and item[0] == BT_SUBDOC:
+        iid = find_field(buf, item[1], "ItemId")
+        if iid and iid[0] == BT_STRING and read_string(buf, iid[1]):
+            return True
+    return False
+
+
+def locate_jewelry(buf: bytes) -> dict:
+    """Walk the BSON tree and return information about the Jewelry module.
+
+    Returned dict keys:
+        ancestor_chain         list[int] of sub-doc / array starts that
+                               strictly enclose the live `Slots` array,
+                               outermost first.  Their size prefixes must
+                               all be updated when the live array grows.
+        jewelry_doc_start      start of the Jewelry module sub-doc
+        bp_ring_count_pos      int32 position of blueprint Ring CountSlots
+        bp_neck_count_pos      int32 position of blueprint Necklace CountSlots
+        live_array_start       value_pos of the live `Slots` array
+                               (i.e. its int32 size prefix)
+        live_array_end         one past the array's trailing 0x00
+        live_slots             list of per-element dicts:
+            kind               "ring" | "neck" | "back" | None
+            has_item           bool
+            elem_start         absolute start of the `03 <name>\\0 <subdoc>`
+                               element bytes
+            elem_end           one past the element's last byte
+    """
+    found: dict = {}
+
+    def descend(doc_start: int, chain: list[int]) -> bool:
+        for t, name, vpos, vend in iter_elements(buf, doc_start):
+            if t not in (BT_SUBDOC, BT_ARRAY):
+                continue
+            # A jewelry module sub-doc has ModuleParams.ModuleTag.TagName
+            # equal to "Inventory.Module.Jewelry".
+            if t == BT_SUBDOC:
+                mp = find_field(buf, vpos, "ModuleParams")
+                if mp and mp[0] == BT_SUBDOC:
+                    mt = find_field(buf, mp[1], "ModuleTag")
+                    if mt and mt[0] == BT_SUBDOC:
+                        tn = find_field(buf, mt[1], "TagName")
+                        if (tn and tn[0] == BT_STRING
+                                and read_string(buf, tn[1]) == JEWELRY_TAG):
+                            found["jewelry_doc_start"] = vpos
+                            found["module_params_start"] = mp[1]
+                            # chain holds every ancestor up to and including
+                            # the parent of jewelry.  Add jewelry itself,
+                            # because the live `Slots` array sits inside it.
+                            found["ancestor_chain"] = list(chain) + [doc_start, vpos]
+                            return True
+            if descend(vpos, chain + [doc_start]):
+                return True
+        return False
+
+    if not descend(0, []):
+        raise RuntimeError(
+            "Could not find the Jewelry module in this character's data."
+        )
+
+    j_start = found["jewelry_doc_start"]
+    mp_start = found["module_params_start"]
+
+    # Blueprint Ring / Necklace CountSlots positions.
+    bp_slots = find_field(buf, mp_start, "Slots")
+    if not bp_slots or bp_slots[0] != BT_ARRAY:
+        raise RuntimeError("Blueprint Slots array not found in ModuleParams.")
+    bp_ring_pos = None
+    bp_neck_pos = None
+    for t, name, vpos, vend in iter_elements(buf, bp_slots[1]):
+        if t != BT_SUBDOC:
+            continue
+        sp = find_field(buf, vpos, "SlotParams")
+        cs = find_field(buf, vpos, "CountSlots")
+        if not sp or sp[0] != BT_STRING or not cs or cs[0] != BT_INT32:
+            continue
+        spath = read_string(buf, sp[1])
+        if spath == RING_PATH:
+            bp_ring_pos = cs[1]
+        elif spath == NECK_PATH:
+            bp_neck_pos = cs[1]
+    if bp_ring_pos is None or bp_neck_pos is None:
+        raise RuntimeError("Blueprint Ring/Necklace entries not found.")
+    found["bp_ring_count_pos"] = bp_ring_pos
+    found["bp_neck_count_pos"] = bp_neck_pos
+
+    # Live `Slots` array (sibling of ModuleParams inside the jewelry sub-doc).
+    live = find_field(buf, j_start, "Slots")
+    if not live or live[0] != BT_ARRAY:
+        raise RuntimeError("Live Slots array not found inside Jewelry module.")
+    found["live_array_start"] = live[1]
+    found["live_array_end"] = live[2]
+
+    live_slots: list[dict] = []
+    for t, name, vpos, vend in iter_elements(buf, live[1]):
+        if t != BT_SUBDOC:
+            continue
+        elem_start = vpos - len(name) - 2  # back up past `<type><name>\0`
+        sp = find_field(buf, vpos, "SlotParams")
+        kind = None
+        if sp and sp[0] == BT_STRING:
+            kind = _classify_slot_path(read_string(buf, sp[1]))
+        live_slots.append({
+            "kind": kind,
+            "has_item": _slot_has_item(buf, vpos),
+            "elem_start": elem_start,
+            "elem_end": vend,
+            "index_name": bytes(name),
+        })
+    found["live_slots"] = live_slots
+    return found
+
+
+# ---------------------------------------------------------------------------
+# Build the new live `Slots` array
+# ---------------------------------------------------------------------------
+
+
+def _retag_slot_element(template_bytes: bytes, new_index_name: str,
+                        new_slot_id: int) -> bytes:
+    """Take a `03 <name>\\0 <subdoc>` slot element, replace its element name
+    with `new_index_name`, and rewrite its `SlotId` int32.  The subdoc body
+    is otherwise copied byte-for-byte so equipped items survive."""
+    if template_bytes[0] != BT_SUBDOC:
+        raise RuntimeError("Slot template did not start with BT_SUBDOC.")
+    name_end = template_bytes.index(b"\x00", 1)
+    subdoc_start = name_end + 1
+    subdoc_size = _u32(template_bytes, subdoc_start)
+    subdoc = bytearray(template_bytes[subdoc_start:subdoc_start + subdoc_size])
+
+    sid_marker = b"\x10SlotId\x00"
+    sp = subdoc.find(sid_marker)
+    if sp == -1:
+        raise RuntimeError("SlotId not found in slot template.")
+    vp = sp + len(sid_marker)
+    subdoc[vp:vp + 4] = int(new_slot_id).to_bytes(4, "little", signed=True)
+
+    out = bytearray()
+    out.append(BT_SUBDOC)
+    out += new_index_name.encode("ascii")
+    out.append(0)
+    out += subdoc
+    return bytes(out)
+
+
+def _build_live_array(buf: bytes, info: dict, new_ring: int, new_neck: int):
+    """Return (new_array_bytes, blocking_items).  If blocking_items is
+    non-empty the caller should NOT splice — the user asked us to remove
+    slots that still contain equipped items."""
+    slots = info["live_slots"]
+    rings = [s for s in slots if s["kind"] == "ring"]
+    necks = [s for s in slots if s["kind"] == "neck"]
+    backs = [s for s in slots if s["kind"] == "back"]
+    others = [s for s in slots if s["kind"] not in ("ring", "neck", "back")]
+
+    if not rings or not necks:
+        raise RuntimeError(
+            "This character has no existing Ring or Necklace live slot to "
+            "use as a template."
+        )
+
+    blocking: list[tuple[str, dict]] = []
+    if new_ring < len(rings):
+        for s in rings[new_ring:]:
+            if s["has_item"]:
+                blocking.append(("Ring", s))
+    if new_neck < len(necks):
+        for s in necks[new_neck:]:
+            if s["has_item"]:
+                blocking.append(("Necklace", s))
+    if blocking:
+        return None, blocking
+
+    ring_template = bytes(buf[rings[0]["elem_start"]:rings[0]["elem_end"]])
+    neck_template = bytes(buf[necks[0]["elem_start"]:necks[0]["elem_end"]])
+
+    # Keep existing slots in order, then append empty clones up to the target
+    # count.  Final order: rings, necklaces, backpack, anything else.
+    sources: list[bytes] = []
+    sources.extend(bytes(buf[s["elem_start"]:s["elem_end"]]) for s in rings[:new_ring])
+    sources.extend([ring_template] * max(0, new_ring - len(rings)))
+    sources.extend(bytes(buf[s["elem_start"]:s["elem_end"]]) for s in necks[:new_neck])
+    sources.extend([neck_template] * max(0, new_neck - len(necks)))
+    sources.extend(bytes(buf[s["elem_start"]:s["elem_end"]]) for s in backs)
+    sources.extend(bytes(buf[s["elem_start"]:s["elem_end"]]) for s in others)
+
+    body = bytearray()
+    for i, src in enumerate(sources):
+        body += _retag_slot_element(src, str(i), i)
+    body.append(0)  # end-of-array sentinel
+
+    arr_size = 4 + len(body)
+    return (arr_size).to_bytes(4, "little", signed=False) + bytes(body), []
+
+
+# ---------------------------------------------------------------------------
+# Top-level patch
+# ---------------------------------------------------------------------------
+
+
+def patch_player_value(value: bytes, new_ring: int, new_neck: int) -> bytes:
+    """Return new bytes for the character record with Ring/Necklace counts
+    set to `new_ring`/`new_neck`.  Raises RuntimeError if the requested
+    shrink would discard an equipped item."""
+    info = locate_jewelry(value)
+
+    new_array, blocking = _build_live_array(value, info, new_ring, new_neck)
+    if blocking:
+        lines = [
+            f"  - {kind} slot (live index {s['index_name'].decode('ascii', errors='replace')}) "
+            f"still has an equipped item"
+            for kind, s in blocking
+        ]
+        raise RuntimeError(
+            "Cannot reduce slot count — the following slots still hold "
+            "equipped items:\n" + "\n".join(lines)
+            + "\nUnequip them in-game first, save, exit, and re-run the patcher."
+        )
+
+    out = bytearray(value)
+    # Step 1: blueprint CountSlots updates (no size change, do these first).
+    out[info["bp_ring_count_pos"]:info["bp_ring_count_pos"] + 4] = \
+        int(new_ring).to_bytes(4, "little", signed=True)
+    out[info["bp_neck_count_pos"]:info["bp_neck_count_pos"] + 4] = \
+        int(new_neck).to_bytes(4, "little", signed=True)
+
+    # Step 2: splice the live array.
+    old_start = info["live_array_start"]
+    old_end = info["live_array_end"]
+    delta = len(new_array) - (old_end - old_start)
+    out = out[:old_start] + bytearray(new_array) + out[old_end:]
+
+    # Step 3: propagate the size delta up every ancestor sub-doc / array.
+    if delta != 0:
+        for doc_start in info["ancestor_chain"]:
+            sz = _u32(out, doc_start)
+            out[doc_start:doc_start + 4] = (sz + delta).to_bytes(4, "little", signed=False)
+
+    # Sanity: root size must now equal total length.
+    if _u32(out, 0) != len(out):
+        raise RuntimeError(
+            f"Internal error: root document size {_u32(out, 0)} != "
+            f"buffer length {len(out)} after splice."
+        )
+    return bytes(out)
+
+
+# ---------------------------------------------------------------------------
+# DB plumbing + interactive flow
+# ---------------------------------------------------------------------------
+
+
+def get_player_name(value: bytes) -> str | None:
+    key = b"PlayerName\x00"
+    p = value.find(key)
+    if p == -1:
+        return None
+    start = p + len(key)
+    if len(value) < start + 4:
+        return None
+    n = _u32(value, start)
+    if n <= 0 or len(value) < start + 4 + n:
+        return None
+    return value[start + 4:start + 4 + n].rstrip(b"\x00").decode("utf-8", errors="replace")
+
+
+def find_save_folder(args: list[str]) -> str:
+    if len(args) >= 2:
+        cand = args[1].strip('"').strip("'")
+        if os.path.isdir(cand):
+            return cand
+        cand = os.path.normpath(cand)
+        if os.path.isdir(cand):
+            return cand
+    print("No folder was dragged onto the script.")
+    p = input("Paste the path to your character's save folder:\n> ").strip().strip('"')
+    if os.path.isdir(p):
+        return p
+    print(f"ERROR: '{p}' is not a directory.")
+    sys.exit(1)
+
+
+def validate_db_folder(folder: str) -> None:
+    if not os.path.isfile(os.path.join(folder, "CURRENT")):
+        print(f"ERROR: No CURRENT file in '{folder}'.")
+        print("       This does not look like a Windrose character save folder.")
+        sys.exit(1)
+
+
+def _rocksdb_options() -> Options:
+    """Match the game's RocksDB build: every SST must be NoCompression."""
+    opts = Options(raw_mode=True)
+    none = DBCompressionType.none()
+    opts.set_compression_type(none)
+    opts.set_bottommost_compression_type(none)
+    opts.set_blob_compression_type(none)
+    return opts
+
+
+def open_db(folder: str):
+    base = _rocksdb_options()
+    try:
+        cfs = Rdict.list_cf(folder, base)
+    except Exception as e:
+        print(f"ERROR: Could not read RocksDB at '{folder}': {e}")
+        print("       Make sure the game is fully closed.")
+        sys.exit(1)
+    if PLAYER_CF_NAME not in cfs:
+        print(f"ERROR: Column family '{PLAYER_CF_NAME}' not found.")
+        sys.exit(1)
+    cf_opts = {n: _rocksdb_options() for n in cfs}
+    db = Rdict(folder, options=base, column_families=cf_opts)
+    return db, db.get_column_family(PLAYER_CF_NAME)
+
+
+def prompt_count(label: str, current: int) -> int:
+    while True:
+        raw = input(
+            f"  {label} — current {current}, new value [{SLOT_MIN}-{SLOT_MAX}] "
+            f"(Enter to keep): "
+        ).strip()
+        if raw == "":
+            return current
+        if raw.isdigit() and SLOT_MIN <= int(raw) <= SLOT_MAX:
+            return int(raw)
+        print(f"    Must be a number between {SLOT_MIN} and {SLOT_MAX}.")
+
+
+def save_pre_patch_backup(db_dir: Path, value: bytes) -> Path | None:
+    bak = db_dir / f"{db_dir.name}.value.pre-patch.bak"
+    if bak.exists():
+        return None  # never overwrite an existing backup
+    try:
+        bak.write_bytes(value)
+        return bak
+    except OSError as e:
+        print(f"  WARNING: could not write backup {bak.name}: {e}")
+        return None
+
+
+def main() -> None:
+    print("=" * 62)
+    print("  Windrose — More Ring and Necklace Slots — Existing Character")
+    print("=" * 62)
+    print()
+
+    folder = os.path.normpath(find_save_folder(sys.argv))
+    validate_db_folder(folder)
+    db_dir = Path(folder)
+    save_root = db_dir.parent.parent  # .../RocksDB_v2/<version>
+
+    print("Opening character save...")
+    db, cf = open_db(folder)
+
+    target_key = None
+    target_value = None
+    target_name = None
+    for k, v in cf.items():
+        if not (isinstance(v, (bytes, bytearray)) and b"Inventory.Module.Jewelry" in v):
+            continue
+        name = get_player_name(v) or "<unknown>"
+        print(f"\nFound character: {name}")
+        ans = input("  Patch this character?  (Y / N / Q to quit) [Y]: ").strip().lower()
+        if ans == "q":
+            print("Aborted.")
+            db.close()
+            return
+        if ans == "n":
+            continue
+        target_key, target_value, target_name = k, bytes(v), name
+        break
+
+    if target_key is None:
+        print("\nNo (more) characters to patch.")
+        db.close()
+        return
+
+    try:
+        info = locate_jewelry(target_value)
+    except Exception as e:
+        print(f"\nERROR: cannot parse jewelry data: {e}")
+        db.close()
+        return
+
+    live_rings = sum(1 for s in info["live_slots"] if s["kind"] == "ring")
+    live_necks = sum(1 for s in info["live_slots"] if s["kind"] == "neck")
+    bp_rings = read_int32(target_value, info["bp_ring_count_pos"])
+    bp_necks = read_int32(target_value, info["bp_neck_count_pos"])
+
+    print(f"\nCurrent jewelry layout for {target_name}:")
+    print(f"  Ring     — live slots: {live_rings}   blueprint: {bp_rings}")
+    print(f"  Necklace — live slots: {live_necks}   blueprint: {bp_necks}")
+    if live_rings != bp_rings or live_necks != bp_necks:
+        print("  (blueprint and live counts disagree — game will reset to live "
+              "count on next save)")
+    print()
+
+    new_rings = prompt_count("Ring slots", max(live_rings, bp_rings))
+    new_necks = prompt_count("Necklace slots", max(live_necks, bp_necks))
+
+    if (new_rings == live_rings and new_necks == live_necks
+            and new_rings == bp_rings and new_necks == bp_necks):
+        print("\nNothing to do — values already match.")
+        db.close()
+        return
+
+    print("\nBuilding patched record...")
+    try:
+        new_value = patch_player_value(target_value, new_rings, new_necks)
+    except Exception as e:
+        print(f"\nERROR: {e}")
+        db.close()
+        return
+
+    bak = save_pre_patch_backup(db_dir, target_value)
+    if bak is not None:
+        print(f"  Saved pre-patch backup: {bak.name}")
+
+    print(f"  Writing patched value ({len(new_value)} bytes, "
+          f"delta {len(new_value) - len(target_value):+d})...")
+    cf[target_key] = new_value
+    db.flush()
+    try:
+        cf.compact_range(b"\x00", b"\xff" * 16)
+        db.compact_range(b"\x00", b"\xff" * 16)
+    except Exception:
+        pass
+    cf.close()
+    db.close()
+
+    print("\nRebuilding authoritative checkpoint backup ZIP...")
+    try:
+        update_checkpoint_zip(save_root, db_dir)
+        print("  Done.  The patch will now survive the next game launch.")
+    except Exception as e:
+        print(f"  WARNING: failed to rebuild checkpoint ZIP: {e}")
+        print("           Your live DB is patched, but the next game launch")
+        print("           may revert it.  Please report this error.")
+
+    print("\n" + "=" * 62)
+    print("Patch complete.")
+    print("=" * 62)
+    input("\nPress Enter to exit...")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        sys.exit(0)
+    except Exception as exc:
+        import traceback
+        print(f"\nUnexpected error: {exc}")
+        traceback.print_exc()
+        input("\nPress Enter to exit...")
+        sys.exit(1)
