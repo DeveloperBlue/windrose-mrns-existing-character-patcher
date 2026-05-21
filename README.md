@@ -17,11 +17,11 @@ If you are creating a new character with the mod install, you do not need this p
 > [!IMPORTANT]
 > You must *temporarily* disable Steam Cloud Sync for Windrose before relaunching the game. When you launch the game, Steam pulls your old save from the cloud and overwrites the new patched save. You can and should re-enable it after you verify the patcher has worked.
 >
-> To disable: **Steam** → right-click Windrose → Properties → General → uncheck *"Keep game saves in the Steam Cloud"*.
+> In **Steam** → right-click Windrose → Properties → General → uncheck *"Keep game saves in the Steam Cloud"*.
 >
 > If Steam asks about a conflict, pick "Use Local files".
 
-**Running the patcher**
+### Running the patcher
 
 1. Download the latest version of the patcher from [releases](https://github.com/DeveloperBlue/windrose-mrns-existing-character-patcher/releases)
 1. Disable Steam Cloud Sync

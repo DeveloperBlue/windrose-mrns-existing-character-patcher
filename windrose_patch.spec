@@ -22,7 +22,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='windrose_patch',
+    name='windrose_mrns_patcher',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
