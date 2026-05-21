@@ -33,7 +33,7 @@ If you are creating a new character with the mod install, you do not need this p
 
 I apologize if Chrome, Windows Defender, or your Antivirus flags the file as a virus. This is just the nature of all unsigned *.exe files. If this is not acceptable for you, consider building from source yourself.
 
-[🛡️ View VirusTotal Scan Report](https://www.virustotal.com/gui/file/bd1f74e13c368736d08bddd8896bac6a32927b90d33b0aae32592cf3eea2d555)
+[🛡️ View VirusTotal Scan Report](https://www.virustotal.com/gui/file-analysis/ODI2MzBiY2QxNzMwN2UwYjE2NjVlN2IwYmRlYjhhODg6MTc3OTM1MTI3Nw==)
 
 ----
 
