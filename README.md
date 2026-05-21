@@ -4,6 +4,22 @@
 
 If you are creating a new character with the mod install, you do not need this patcher.
 
+## Preview
+
+<table>
+  <tr>
+    <td colspan="2" align="center"><img src="images/5.jpg" alt="In-game character inventory showing extra ring and necklace slots after patching" width="100%"/><br/><em>Existing character with extra ring & necklace slots after patching</em></td>
+  </tr>
+  <tr>
+    <td width="50%" align="center"><img src="images/1.png" alt="Patcher character selection menu" width="100%"/><br/><em>1. Select the character to patch</em></td>
+    <td width="50%" align="center"><img src="images/2.png" alt="Patcher prompting for new ring and necklace slot counts" width="100%"/><br/><em>2. Enter the slot counts matching your Nexus mod variant</em></td>
+  </tr>
+  <tr>
+    <td width="50%" align="center"><img src="images/3.png" alt="Patcher showing patch complete confirmation" width="100%"/><br/><em>3. Patch complete with pre-patch backup saved</em></td>
+    <td width="50%" align="center"><img src="images/4.png" alt="Steam Cloud Sync toggle disabled in Windrose properties" width="100%"/><br/><em>4. Temporarily disable Steam Cloud Sync before launching</em></td>
+  </tr>
+</table>
+
 > [!NOTE]
 > Ensure you have [More Ring and Necklace Slots mod](https://www.nexusmods.com/windrose/mods/350) by Baradrim installed. You can double check that it is working by creating a new character, and checking in the tutorial to see if you have the extra slots.
 
